@@ -1,0 +1,78 @@
+# The @argszero/dsh-thinking-roundtrip-guard bundle patch: mount and go.
+#
+# A session that mixes provider routes stops being able to use a Messages route
+# with thinking enabled.
+#
+# The endpoint requires every **historical** assistant turn that carries a tool
+# call to carry a thinking block as well:
+#
+#   The `content[].thinking` in the thinking mode must be passed back to the API.
+#
+# and dsh's serializer emits one only where the durable message already holds a
+# `reasoning` block:
+#
+#   packages/llm/llm-deepseek/src/serialize.ts
+#     case 'reasoning': return { type: 'thinking', thinking: block.text, ...signature }
+#     case 'tool-call': return { type: 'tool_use', id: block.id, name: block.name, input: toolInput(block.arguments) }
+#
+# A turn produced on another route — a pi-ai route, a different dialect — is
+# durable as text plus a tool call and no reasoning block at all, so switching
+# back leaves turns the endpoint refuses. The history is append-only, so the
+# refusal repeats on every later request and the session can never use that route
+# again — not even for a plain-text follow-up.
+#
+# This plugin repairs the outbound request at the one seam every model call
+# crosses, the `llm/stream` waterfall:
+#
+#   packages/llm/llm/src/index.ts
+#     stream(options) { return this.streamWithRegistration(options) }
+#     streamWithRegistration(options) { return this.ctx.waterfall(this, 'llm/stream', options, () => this.adapterStream(options)) }
+#
+# A loop-built request arrives deep frozen — the waterfall's contract is that its
+# content is a pure function of the session log, so listeners read it and never
+# rewrite it — and `next` takes no argument. The only way to hand the adapter a
+# different request is to ask the runtime for a stream of that request:
+# `ctx.llm.stream(replacement)`. That re-enters this same waterfall, so the
+# listener sees its own replacement; identity is what stops it, and every object
+# this plugin builds is recorded in a `WeakSet`. A request already recorded is
+# passed to `next()` untouched, and a history with no gap never leaves the
+# ordinary path at all.
+#
+# Synthesizing the block is legal in this repository's model: a ReasoningBlock is
+# { type, text }, the signature lives beside it in the replay envelope, and the
+# reporter measured the live endpoint — a thinking block without a signature
+# answers 200. The block is inserted first, because a thinking block that follows
+# text or a tool call is not the shape the dialect defines.
+#
+# A synthesized block is still a claim about a turn this process did not produce,
+# so `synthesize` also reads the response. An adapter throw is converted into a
+# terminal `finish` frame before any consumer sees it:
+#
+#   packages/llm/llm/src/index.ts
+#     function adapterFailureChunk(error, signal) { ... return { type: 'finish', reason: { kind: 'error', failure } } }
+#
+# That frame is withheld — only when nothing visible has been forwarded, so
+# nothing is replayed that the caller already saw — and the **original** history is
+# retried with reasoning off, which is the shape a thinking-disabled route accepts
+# (measured: tool-call history, no thinking blocks, thinking disabled = 200). If
+# the retry fails too, its own frame is the one the caller gets.
+#
+# The durable session log is never touched: the repair lives in the request this
+# process sends, so revoking this plugin revokes the repair. The core fix belongs
+# in the serializer or the request assembly, where the route's thinking policy is
+# known — a plugin cannot see a connection's defaults.
+#
+# Modes: `synthesize` (default) inserts the missing block; `degrade` sends the
+# same history with reasoning off and needs no knowledge of the provider's
+# wording; `observe` counts what would be repaired and changes nothing; `off`
+# installs no listener. `{{thinkingRoundtripGuard}}` serves `snapshot()` — the
+# counters, the refused configuration values, and the plugin's own blind spots on
+# every read.
+
+- insert:
+    - id: thinking-roundtrip-guard
+      name: '@argszero/dsh-thinking-roundtrip-guard'
+      config:
+        mode: synthesize
+        providers:
+          - deepseek-official
