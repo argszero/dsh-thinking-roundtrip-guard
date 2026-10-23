@@ -49,14 +49,13 @@ sees — exactly one terminal frame, never the discarded attempt's.
 ## Install
 
 ```sh
-dsh plugin add @argszero/dsh-thinking-roundtrip-guard
+dsh plugin --profile <profile> add github:argszero/dsh-thinking-roundtrip-guard
 ```
 
-or from git:
-
-```sh
-dsh plugin add github:argszero/dsh-thinking-roundtrip-guard
-```
+The git form is the only form there is right now: the npm name is not published,
+so `dsh plugin add @argszero/dsh-thinking-roundtrip-guard` fails with `E404`. A
+plain `npm install` of the same git spec only places the files; `dsh plugin add`
+is the step that mounts it in the profile.
 
 Mount it in a profile entry:
 
